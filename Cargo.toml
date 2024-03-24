@@ -1,25 +1,55 @@
-[workspace]
-members = ["rcgen", "rustls-cert-gen"]
-resolver = "2"
-
-[workspace.dependencies]
-aws-lc-rs = "1.6.0"
-pem = "3.0.2"
-pki-types = { package = "rustls-pki-types", version = "1.3.0" }
-rand = "0.8"
-ring = "0.17"
-x509-parser = "0.16"
-
-[workspace.package]
+[package]
+name = "rcgen"
+version = "0.11.3"
+description = "Rust X.509 certificate generator"
+repository = "https://github.com/est31/rcgen"
+documentation = "https://docs.rs/rcgen"
 license = "MIT OR Apache-2.0"
 edition = "2021"
 readme = "README.md"
-description = "Rust X.509 certificate generator"
-repository = "https://github.com/rustls/rcgen"
 keywords = ["mkcert", "ca", "certificate"]
 
+[lib]
+name = "rcgen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rcgen"
+path = "src/main.rs"
+required-features = ["pem"]
+
+[[example]]
+name = "rsa-irc"
+required-features = ["pem"]
+
+[[example]]
+name = "rsa-irc-openssl"
+required-features = ["pem"]
+
+[dependencies]
+yasna = { version = "0.5.2", features = ["time", "std"] }
+ring = { version = ">=0.17.8" }
+pem = { version = "3.0.2", optional = true }
+time = { version = "0.3.6", default-features = false }
+x509-parser = { version = "0.15", features = ["verify"], optional = true }
+zeroize = { version = "1.2", optional = true }
+
+[features]
+default = ["pem"]
+
+[package.metadata.docs.rs]
+features = ["x509-parser"]
+
+[dev-dependencies]
+openssl = "0.10"
+x509-parser = { version = "0.15", features = ["verify"] }
+rustls-webpki = { version = "0.101.0", features = ["std"] }
+botan = { version = "0.10", features = ["vendored"] }
+rand = "0.8"
+rsa = "0.9"
+
 # This greatly speeds up rsa key generation times
-# (only applies to the dev-dependency of rcgen because cargo
+# (only applies to the dev-dependency because cargo
 # ignores profile overrides for non leaf packages)
 [profile.dev.package.num-bigint-dig]
 opt-level = 3

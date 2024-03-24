@@ -7,6 +7,7 @@
 Simple Rust library to generate X.509 certificates.
 
 ```Rust
+extern crate rcgen;
 use rcgen::generate_simple_self_signed;
 let subject_alt_names = vec!["hello.world.example".to_string(),
 	"localhost".to_string()];
@@ -31,7 +32,7 @@ to [this](https://lapo.it/asn1js/) service is very useful.
 
 ## Trying it out with quinn
 
-You can use rcgen together with the [quinn](https://github.com/quinn-rs/quinn) crate.
+You can use rcgen together with the [quinn](https://github.com/djc/quinn) crate.
 The whole set of commands is:
 ```
 cargo run

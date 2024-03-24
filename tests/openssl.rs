@@ -1,9 +1,4 @@
 #![cfg(feature = "pem")]
-
-use std::cell::RefCell;
-use std::io::{Error, ErrorKind, Read, Result as ioResult, Write};
-use std::rc::Rc;
-
 use openssl::asn1::{Asn1Integer, Asn1Time};
 use openssl::bn::BigNum;
 use openssl::pkey::PKey;
@@ -11,19 +6,21 @@ use openssl::ssl::{HandshakeError, SslAcceptor, SslConnector, SslMethod};
 use openssl::stack::Stack;
 use openssl::x509::store::{X509Store, X509StoreBuilder};
 use openssl::x509::{CrlStatus, X509Crl, X509Req, X509StoreContext, X509};
-
 use rcgen::{
 	BasicConstraints, Certificate, CertificateParams, DnType, DnValue, GeneralSubtree, IsCa,
-	KeyPair, NameConstraints,
+	NameConstraints,
 };
+use std::cell::RefCell;
+use std::io::{Error, ErrorKind, Read, Result as ioResult, Write};
+use std::rc::Rc;
 
 mod util;
 
 fn verify_cert_basic(cert: &Certificate) {
-	let cert_pem = cert.pem();
+	let cert_pem = cert.serialize_pem().unwrap();
 	println!("{cert_pem}");
 
-	let x509 = X509::from_pem(cert_pem.as_bytes()).unwrap();
+	let x509 = X509::from_pem(&cert_pem.as_bytes()).unwrap();
 	let mut builder = X509StoreBuilder::new().unwrap();
 	builder.add_cert(x509.clone()).unwrap();
 
@@ -31,7 +28,7 @@ fn verify_cert_basic(cert: &Certificate) {
 	let mut ctx = X509StoreContext::new().unwrap();
 	let mut stack = Stack::new().unwrap();
 	stack.push(x509.clone()).unwrap();
-	ctx.init(&store, &x509, stack.as_ref(), |ctx| {
+	ctx.init(&store, &x509, &stack.as_ref(), |ctx| {
 		ctx.verify_cert().unwrap();
 		Ok(())
 	})
@@ -82,7 +79,7 @@ impl Read for PipeEnd {
 	fn read(&mut self, mut buf: &mut [u8]) -> ioResult<usize> {
 		let inner = self.inner.borrow_mut();
 		let r_sl = &inner.0[1 - self.end_idx][self.read_pos..];
-		if r_sl.is_empty() {
+		if r_sl.len() == 0 {
 			return Err(Error::new(ErrorKind::WouldBlock, "oh no!"));
 		}
 		let r = buf.len().min(r_sl.len());
@@ -92,19 +89,21 @@ impl Read for PipeEnd {
 	}
 }
 
-fn verify_cert(cert: &Certificate, key_pair: &KeyPair) {
+fn verify_cert(cert: &Certificate) {
 	verify_cert_basic(cert);
-	let key = key_pair.serialize_der();
-	verify_cert_ca(&cert.pem(), &key, &cert.pem());
+	let cert_pem = cert.serialize_pem().unwrap();
+	let key = cert.serialize_private_key_der();
+
+	verify_cert_ca(&cert_pem, &key, &cert_pem);
 }
 
 fn verify_cert_ca(cert_pem: &str, key: &[u8], ca_cert_pem: &str) {
 	println!("{cert_pem}");
 	println!("{ca_cert_pem}");
 
-	let x509 = X509::from_pem(cert_pem.as_bytes()).unwrap();
+	let x509 = X509::from_pem(&cert_pem.as_bytes()).unwrap();
 
-	let ca_x509 = X509::from_pem(ca_cert_pem.as_bytes()).unwrap();
+	let ca_x509 = X509::from_pem(&ca_cert_pem.as_bytes()).unwrap();
 
 	let mut builder = X509StoreBuilder::new().unwrap();
 	builder.add_cert(ca_x509).unwrap();
@@ -114,7 +113,7 @@ fn verify_cert_ca(cert_pem: &str, key: &[u8], ca_cert_pem: &str) {
 	let srv = SslMethod::tls_server();
 	let mut ssl_srv_ctx = SslAcceptor::mozilla_modern(srv).unwrap();
 	//let key = cert.serialize_private_key_der();
-	let pkey = PKey::private_key_from_der(key).unwrap();
+	let pkey = PKey::private_key_from_der(&key).unwrap();
 	ssl_srv_ctx.set_private_key(&pkey).unwrap();
 
 	ssl_srv_ctx.set_certificate(&x509).unwrap();
@@ -163,73 +162,63 @@ fn verify_cert_ca(cert_pem: &str, key: &[u8], ca_cert_pem: &str) {
 	// TODO read the data we just wrote from the streams
 }
 
-fn verify_csr(cert: &Certificate, key_pair: &KeyPair) {
-	let csr = cert
-		.params()
-		.serialize_request(key_pair)
-		.and_then(|csr| csr.pem())
-		.unwrap();
+fn verify_csr(cert: &Certificate) {
+	let csr = cert.serialize_request_pem().unwrap();
 	println!("{csr}");
-	let key = key_pair.serialize_der();
+	let key = cert.serialize_private_key_der();
 	let pkey = PKey::private_key_from_der(&key).unwrap();
 
-	let req = X509Req::from_pem(csr.as_bytes()).unwrap();
+	let req = X509Req::from_pem(&csr.as_bytes()).unwrap();
 	req.verify(&pkey).unwrap();
 }
 
 #[test]
 fn test_openssl() {
-	let (params, key_pair) = util::default_params();
-	let cert = params.self_signed(&key_pair).unwrap();
-	verify_cert(&cert, &key_pair);
+	let params = util::default_params();
+	let cert = Certificate::from_params(params).unwrap();
+
+	// Now verify the certificate.
+	verify_cert(&cert);
 }
 
 #[test]
 fn test_request() {
-	let (params, key_pair) = util::default_params();
-	let cert = params.self_signed(&key_pair).unwrap();
-	verify_csr(&cert, &key_pair);
+	let params = util::default_params();
+	let cert = Certificate::from_params(params).unwrap();
+
+	verify_csr(&cert);
 }
 
 #[test]
 fn test_openssl_256() {
-	let (params, _) = util::default_params();
-	let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-	let cert = params.self_signed(&key_pair).unwrap();
+	let mut params = util::default_params();
+	params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+
+	let cert = Certificate::from_params(params).unwrap();
 
 	// Now verify the certificate.
-	verify_cert(&cert, &key_pair);
-	verify_csr(&cert, &key_pair);
+	verify_cert(&cert);
+	verify_csr(&cert);
 }
 
 #[test]
 fn test_openssl_384() {
-	let (params, _) = util::default_params();
-	let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
-	let cert = params.self_signed(&key_pair).unwrap();
+	let mut params = util::default_params();
+	params.alg = &rcgen::PKCS_ECDSA_P384_SHA384;
+
+	let cert = Certificate::from_params(params).unwrap();
 
 	// Now verify the certificate.
-	verify_cert(&cert, &key_pair);
-	verify_csr(&cert, &key_pair);
-}
-
-#[test]
-#[cfg(feature = "aws_lc_rs")]
-fn test_openssl_521() {
-	let (params, _) = util::default_params();
-	let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P521_SHA512).unwrap();
-	let cert = params.self_signed(&key_pair).unwrap();
-
-	// Now verify the certificate.
-	verify_cert(&cert, &key_pair);
-	verify_csr(&cert, &key_pair);
+	verify_cert(&cert);
+	verify_csr(&cert);
 }
 
 #[test]
 fn test_openssl_25519() {
-	let (params, _) = util::default_params();
-	let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
-	let cert = params.self_signed(&key_pair).unwrap();
+	let mut params = util::default_params();
+	params.alg = &rcgen::PKCS_ED25519;
+
+	let cert = Certificate::from_params(params).unwrap();
 
 	// Now verify the certificate.
 	// TODO openssl doesn't support v2 keys (yet)
@@ -241,17 +230,20 @@ fn test_openssl_25519() {
 
 #[test]
 fn test_openssl_25519_v1_given() {
-	let (params, _) = util::default_params();
-	let key_pair = rcgen::KeyPair::from_pem(util::ED25519_TEST_KEY_PAIR_PEM_V1).unwrap();
-	let cert = params.self_signed(&key_pair).unwrap();
+	let mut params = util::default_params();
+	params.alg = &rcgen::PKCS_ED25519;
+
+	let kp = rcgen::KeyPair::from_pem(util::ED25519_TEST_KEY_PAIR_PEM_V1).unwrap();
+	params.key_pair = Some(kp);
+
+	let cert = Certificate::from_params(params).unwrap();
 
 	// Now verify the certificate as well as CSR,
 	// but only on OpenSSL >= 1.1.1
 	// On prior versions, only do basic verification
-	#[allow(clippy::unusual_byte_groupings)]
 	if openssl::version::number() >= 0x1_01_01_00_f {
-		verify_cert(&cert, &key_pair);
-		verify_csr(&cert, &key_pair);
+		verify_cert(&cert);
+		verify_csr(&cert);
 	} else {
 		verify_cert_basic(&cert);
 	}
@@ -259,9 +251,13 @@ fn test_openssl_25519_v1_given() {
 
 #[test]
 fn test_openssl_25519_v2_given() {
-	let (params, _) = util::default_params();
-	let key_pair = rcgen::KeyPair::from_pem(util::ED25519_TEST_KEY_PAIR_PEM_V2).unwrap();
-	let cert = params.self_signed(&key_pair).unwrap();
+	let mut params = util::default_params();
+	params.alg = &rcgen::PKCS_ED25519;
+
+	let kp = rcgen::KeyPair::from_pem(util::ED25519_TEST_KEY_PAIR_PEM_V2).unwrap();
+	params.key_pair = Some(kp);
+
+	let cert = Certificate::from_params(params).unwrap();
 
 	// Now verify the certificate.
 	// TODO openssl doesn't support v2 keys (yet)
@@ -273,13 +269,17 @@ fn test_openssl_25519_v2_given() {
 
 #[test]
 fn test_openssl_rsa_given() {
-	let (params, _) = util::default_params();
-	let key_pair = KeyPair::from_pem(util::RSA_TEST_KEY_PAIR_PEM).unwrap();
-	let cert = params.self_signed(&key_pair).unwrap();
+	let mut params = util::default_params();
+	params.alg = &rcgen::PKCS_RSA_SHA256;
+
+	let kp = rcgen::KeyPair::from_pem(util::RSA_TEST_KEY_PAIR_PEM).unwrap();
+	params.key_pair = Some(kp);
+
+	let cert = Certificate::from_params(params).unwrap();
 
 	// Now verify the certificate.
-	verify_cert(&cert, &key_pair);
-	verify_csr(&cert, &key_pair);
+	verify_cert(&cert);
+	verify_csr(&cert);
 }
 
 #[test]
@@ -291,15 +291,18 @@ fn test_openssl_rsa_combinations_given() {
 		//&rcgen::PKCS_RSA_PSS_SHA256,
 	];
 	for (i, alg) in alg_list.iter().enumerate() {
-		let (params, _) = util::default_params();
-		let key_pair =
-			KeyPair::from_pkcs8_pem_and_sign_algo(util::RSA_TEST_KEY_PAIR_PEM, alg).unwrap();
-		let cert = params.self_signed(&key_pair).unwrap();
+		let mut params = util::default_params();
+		params.alg = alg;
+
+		let kp = rcgen::KeyPair::from_pem_and_sign_algo(util::RSA_TEST_KEY_PAIR_PEM, alg).unwrap();
+		params.key_pair = Some(kp);
+
+		let cert = Certificate::from_params(params).unwrap();
 
 		// Now verify the certificate.
 		if i >= 4 {
-			verify_cert(&cert, &key_pair);
-			verify_csr(&cert, &key_pair);
+			verify_cert(&cert);
+			verify_csr(&cert);
 		} else {
 			// The PSS key types are not fully supported.
 			// An attempt to use them gives a handshake error.
@@ -310,73 +313,76 @@ fn test_openssl_rsa_combinations_given() {
 
 #[test]
 fn test_openssl_separate_ca() {
-	let (mut params, ca_key) = util::default_params();
+	let mut params = util::default_params();
 	params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-	let ca_cert = params.self_signed(&ca_key).unwrap();
-	let ca_cert_pem = ca_cert.pem();
+	let ca_cert = Certificate::from_params(params).unwrap();
+	let ca_cert_pem = ca_cert.serialize_pem().unwrap();
 
-	let mut params = CertificateParams::new(vec!["crabs.crabs".to_string()]).unwrap();
+	let mut params = CertificateParams::new(vec!["crabs.crabs".to_string()]);
 	params
 		.distinguished_name
 		.push(DnType::OrganizationName, "Crab widgits SE");
 	params
 		.distinguished_name
 		.push(DnType::CommonName, "Dev domain");
-	let cert_key = KeyPair::generate().unwrap();
-	let cert = params.signed_by(&cert_key, &ca_cert, &ca_key).unwrap();
-	let key = cert_key.serialize_der();
+	let cert = Certificate::from_params(params).unwrap();
+	let cert_pem = cert.serialize_pem_with_signer(&ca_cert).unwrap();
+	let key = cert.serialize_private_key_der();
 
-	verify_cert_ca(&cert.pem(), &key, &ca_cert_pem);
+	verify_cert_ca(&cert_pem, &key, &ca_cert_pem);
 }
 
 #[test]
 fn test_openssl_separate_ca_with_printable_string() {
-	let (mut params, ca_key) = util::default_params();
+	let mut params = util::default_params();
 	params.distinguished_name.push(
 		DnType::CountryName,
-		DnValue::PrintableString("US".try_into().unwrap()),
+		DnValue::PrintableString("US".to_string()),
 	);
 	params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-	let ca_cert = params.self_signed(&ca_key).unwrap();
+	let ca_cert = Certificate::from_params(params).unwrap();
+	let ca_cert_pem = ca_cert.serialize_pem().unwrap();
 
-	let mut params = CertificateParams::new(vec!["crabs.crabs".to_string()]).unwrap();
+	let mut params = CertificateParams::new(vec!["crabs.crabs".to_string()]);
 	params
 		.distinguished_name
 		.push(DnType::OrganizationName, "Crab widgits SE");
 	params
 		.distinguished_name
 		.push(DnType::CommonName, "Dev domain");
-	let cert_key = KeyPair::generate().unwrap();
-	let cert = params.signed_by(&cert_key, &ca_cert, &ca_key).unwrap();
-	let key = cert_key.serialize_der();
+	let cert = Certificate::from_params(params).unwrap();
+	let cert_pem = cert.serialize_pem_with_signer(&ca_cert).unwrap();
+	let key = cert.serialize_private_key_der();
 
-	verify_cert_ca(&cert.pem(), &key, &ca_cert.pem());
+	verify_cert_ca(&cert_pem, &key, &ca_cert_pem);
 }
 
 #[test]
 fn test_openssl_separate_ca_with_other_signing_alg() {
-	let (mut params, _) = util::default_params();
+	let mut params = util::default_params();
+	params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
 	params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-	let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-	let ca_cert = params.self_signed(&ca_key).unwrap();
+	let ca_cert = Certificate::from_params(params).unwrap();
+	let ca_cert_pem = ca_cert.serialize_pem().unwrap();
 
-	let mut params = CertificateParams::new(vec!["crabs.crabs".to_string()]).unwrap();
+	let mut params = CertificateParams::new(vec!["crabs.crabs".to_string()]);
+	params.alg = &rcgen::PKCS_ECDSA_P384_SHA384;
 	params
 		.distinguished_name
 		.push(DnType::OrganizationName, "Crab widgits SE");
 	params
 		.distinguished_name
 		.push(DnType::CommonName, "Dev domain");
-	let cert_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
-	let cert = params.signed_by(&cert_key, &ca_cert, &ca_key).unwrap();
-	let key = cert_key.serialize_der();
+	let cert = Certificate::from_params(params).unwrap();
+	let cert_pem = cert.serialize_pem_with_signer(&ca_cert).unwrap();
+	let key = cert.serialize_private_key_der();
 
-	verify_cert_ca(&cert.pem(), &key, &ca_cert.pem());
+	verify_cert_ca(&cert_pem, &key, &ca_cert_pem);
 }
 
 #[test]
 fn test_openssl_separate_ca_name_constraints() {
-	let (mut params, ca_key) = util::default_params();
+	let mut params = util::default_params();
 	params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 
 	println!("openssl version: {:x}", openssl::version::number());
@@ -388,45 +394,47 @@ fn test_openssl_separate_ca_name_constraints() {
 		//excluded_subtrees : vec![GeneralSubtree::DnsName(".v".to_string())],
 		excluded_subtrees: Vec::new(),
 	});
-	let ca_cert = params.self_signed(&ca_key).unwrap();
+	let ca_cert = Certificate::from_params(params).unwrap();
+	let ca_cert_pem = ca_cert.serialize_pem().unwrap();
 
-	let mut params = CertificateParams::new(vec!["crabs.crabs".to_string()]).unwrap();
+	let mut params = CertificateParams::new(vec!["crabs.crabs".to_string()]);
 	params
 		.distinguished_name
 		.push(DnType::OrganizationName, "Crab widgits SE");
 	params
 		.distinguished_name
 		.push(DnType::CommonName, "Dev domain");
-	let cert_key = KeyPair::generate().unwrap();
-	let cert = params.signed_by(&cert_key, &ca_cert, &ca_key).unwrap();
-	let key = cert_key.serialize_der();
+	let cert = Certificate::from_params(params).unwrap();
+	let cert_pem = cert.serialize_pem_with_signer(&ca_cert).unwrap();
+	let key = cert.serialize_private_key_der();
 
-	verify_cert_ca(&cert.pem(), &key, &ca_cert.pem());
+	verify_cert_ca(&cert_pem, &key, &ca_cert_pem);
 }
 
 #[test]
 fn test_openssl_crl_parse() {
 	// Create a CRL with one revoked cert, and an issuer to sign the CRL.
 	let (crl, issuer) = util::test_crl();
-	let revoked_cert = crl.params().revoked_certs.first().unwrap();
+	let revoked_cert = crl.get_params().revoked_certs.first().unwrap();
 	let revoked_cert_serial = &revoked_cert.serial_number;
 
 	// Serialize the CRL signed by the issuer in both PEM and DER.
-	let crl_pem = crl.pem().unwrap();
+	let crl_pem = crl.serialize_pem_with_signer(&issuer).unwrap();
+	let crl_der = crl.serialize_der_with_signer(&issuer).unwrap();
 
 	// We should be able to parse the PEM form without error.
 	assert!(X509Crl::from_pem(crl_pem.as_bytes()).is_ok());
 
 	// We should also be able to parse the DER form without error.
-	let openssl_crl = X509Crl::from_der(crl.der()).expect("failed to parse CRL DER");
+	let openssl_crl = X509Crl::from_der(&crl_der).expect("failed to parse CRL DER");
 
 	// The properties of the CRL should match expected.
-	let openssl_issuer = X509::from_der(issuer.der()).unwrap();
+	let openssl_issuer = X509::from_der(&issuer.serialize_der().unwrap()).unwrap();
 	let expected_last_update =
-		Asn1Time::from_unix(crl.params().this_update.unix_timestamp()).unwrap();
+		Asn1Time::from_unix(crl.get_params().this_update.unix_timestamp()).unwrap();
 	assert!(openssl_crl.last_update().eq(&expected_last_update));
 	let expected_next_update =
-		Asn1Time::from_unix(crl.params().next_update.unix_timestamp()).unwrap();
+		Asn1Time::from_unix(crl.get_params().next_update.unix_timestamp()).unwrap();
 	assert!(openssl_crl.next_update().unwrap().eq(&expected_next_update));
 	assert!(matches!(
 		openssl_crl
